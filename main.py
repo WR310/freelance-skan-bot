@@ -3,8 +3,10 @@ import logging
 import xml.etree.ElementTree as ET
 import re
 import aiohttp
+import sqlite3
 from google import genai
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 import sys
@@ -16,8 +18,8 @@ TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
 GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 
-# Более точные ключевые слова для вайб-кодинга
-KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "openai", "chatgpt"]
+# Ключевые слова для поиска
+KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
 # Интервал проверки новых заказов
 CHECK_INTERVAL = 300  
@@ -31,16 +33,73 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-seen_jobs = set()
-
 # Предкомпилируем регулярные выражения для скорости
 compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in KEYWORDS]
+
+# ==========================================
+# БАЗА ДАННЫХ (SQLITE)
+# ==========================================
+def init_db():
+    """Создает таблицу, если её еще нет."""
+    conn = sqlite3.connect('scanner.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS seen_jobs (
+            id TEXT PRIMARY KEY
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def is_job_seen(job_id: str) -> bool:
+    """Проверяет, есть ли заказ в базе."""
+    conn = sqlite3.connect('scanner.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM seen_jobs WHERE id = ?', (job_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return bool(result)
+
+def mark_job_seen(job_id: str):
+    """Добавляет заказ в базу просмотренных."""
+    conn = sqlite3.connect('scanner.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO seen_jobs (id) VALUES (?)', (job_id,))
+    conn.commit()
+    conn.close()
+
+def get_total_seen_jobs() -> int:
+    """Возвращает общее количество заказов в базе."""
+    conn = sqlite3.connect('scanner.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM seen_jobs')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+# ==========================================
+# ТЕЛЕГРАМ КОМАНДЫ (УПРАВЛЕНИЕ)
+# ==========================================
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    if message.from_user.id == TELEGRAM_USER_ID:
+        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status, чтобы проверить статистику базы данных.")
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    if message.from_user.id == TELEGRAM_USER_ID:
+        total_jobs = get_total_seen_jobs()
+        await message.answer(
+            f"✅ <b>Система стабильна.</b>\n"
+            f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
+            f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
+            f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут."
+        )
 
 # ==========================================
 # ЛОГИКА ИИ (ГЕНЕРАЦИЯ ОТКЛИКА)
 # ==========================================
 async def generate_cover_letter(title: str, description: str) -> str:
-    """Генерирует отклик с учетом лимитов API (Rate Limit)."""
     prompt = f"""
     Ты — профессиональный Python-разработчик на фрилансе. 
     Твоя задача — написать короткий, уверенный и цепляющий отклик на заказ. 
@@ -57,10 +116,7 @@ async def generate_cover_letter(title: str, description: str) -> str:
             model='gemini-2.5-flash',
             contents=prompt
         ))
-        
-        # Защита от лимитов (макс 15 RPM = пауза ~4 сек между запросами)
         await asyncio.sleep(4) 
-        
         return response.text.strip()
     except Exception as e:
         logging.error(f"Ошибка API Gemini: {e}")
@@ -103,12 +159,11 @@ async def fetch_fl_jobs(session: aiohttp.ClientSession):
 # ОСНОВНОЙ РАБОЧИЙ ЦИКЛ
 # ==========================================
 def contains_keywords(title: str) -> bool:
-    """Ищет полные слова, чтобы избежать мусора (работа -> бот)."""
     return any(pattern.search(title) for pattern in compiled_keywords)
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v3.0 (Anti-Ban Edition) запущен!</b>")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет запущен!</b> База данных подключена. Мониторинг активен.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
@@ -119,10 +174,12 @@ async def scan_freelance_boards():
             
             new_matches = 0
             for job in jobs:
-                if job['id'] in seen_jobs:
+                # Проверяем в базе SQLite
+                if is_job_seen(job['id']):
                     continue
                 
-                seen_jobs.add(job['id'])
+                # Сразу записываем в базу
+                mark_job_seen(job['id'])
                 
                 if contains_keywords(job['title']):
                     new_matches += 1
@@ -143,13 +200,16 @@ async def scan_freelance_boards():
                     except Exception as e:
                         logging.error(f"Ошибка отправки: {e}")
             
-            logging.info(f"Найдено {new_matches} заказов. Сплю {CHECK_INTERVAL} сек.")
+            logging.info(f"Найдено {new_matches} новых заказов. Сплю {CHECK_INTERVAL} сек.")
             await asyncio.sleep(CHECK_INTERVAL)
 
 # ==========================================
 # ЗАПУСК
 # ==========================================
 async def main():
+    # Инициализируем базу данных при старте
+    init_db()
+    
     asyncio.create_task(scan_freelance_boards())
     await dp.start_polling(bot)
 
