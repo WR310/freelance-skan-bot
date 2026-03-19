@@ -40,7 +40,6 @@ compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in 
 # БАЗА ДАННЫХ (SQLITE)
 # ==========================================
 def init_db():
-    """Создает таблицу, если её еще нет."""
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -52,7 +51,6 @@ def init_db():
     conn.close()
 
 def is_job_seen(job_id: str) -> bool:
-    """Проверяет, есть ли заказ в базе."""
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
     cursor.execute('SELECT 1 FROM seen_jobs WHERE id = ?', (job_id,))
@@ -61,7 +59,6 @@ def is_job_seen(job_id: str) -> bool:
     return bool(result)
 
 def mark_job_seen(job_id: str):
-    """Добавляет заказ в базу просмотренных."""
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
     cursor.execute('INSERT OR IGNORE INTO seen_jobs (id) VALUES (?)', (job_id,))
@@ -69,7 +66,6 @@ def mark_job_seen(job_id: str):
     conn.close()
 
 def get_total_seen_jobs() -> int:
-    """Возвращает общее количество заказов в базе."""
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM seen_jobs')
@@ -83,7 +79,7 @@ def get_total_seen_jobs() -> int:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == TELEGRAM_USER_ID:
-        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status, чтобы проверить статистику базы данных.")
+        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status, чтобы проверить статистику.")
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
@@ -91,6 +87,7 @@ async def cmd_status(message: types.Message):
         total_jobs = get_total_seen_jobs()
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
+            f"🌐 <b>Источники:</b> FL.ru, Хабр Фриланс\n"
             f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
             f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
             f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут."
@@ -123,36 +120,42 @@ async def generate_cover_letter(title: str, description: str) -> str:
         return "⚠️ Ошибка генерации. Возможно, лимит запросов."
 
 # ==========================================
-# ПАРСИНГ (СБОР ДАННЫХ)
+# ПАРСИНГ ИСТОЧНИКОВ
 # ==========================================
 async def fetch_fl_jobs(session: aiohttp.ClientSession):
     url = "https://www.fl.ru/rss/all.xml"
     jobs = []
     try:
         async with session.get(url, timeout=10) as response:
-            if response.status != 200:
-                logging.error(f"Ошибка FL.ru: {response.status}")
-                return jobs
-            
-            content = await response.text()
-            root = ET.fromstring(content)
-            
-            for item in root.findall('./channel/item'):
-                title = item.find('title').text if item.find('title') is not None else ""
-                link = item.find('link').text if item.find('link') is not None else ""
-                description = item.find('description').text if item.find('description') is not None else ""
-                
-                description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
-                
-                jobs.append({
-                    "id": link,  
-                    "title": title,
-                    "link": link,
-                    "description": description
-                })
+            if response.status == 200:
+                content = await response.text()
+                root = ET.fromstring(content)
+                for item in root.findall('./channel/item'):
+                    title = item.find('title').text if item.find('title') is not None else ""
+                    link = item.find('link').text if item.find('link') is not None else ""
+                    description = item.find('description').text if item.find('description') is not None else ""
+                    description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
+                    jobs.append({"id": link, "title": f"[FL] {title}", "link": link, "description": description})
     except Exception as e:
-        logging.error(f"Ошибка парсинга: {e}")
-    
+        logging.error(f"Ошибка парсинга FL.ru: {e}")
+    return jobs
+
+async def fetch_habr_jobs(session: aiohttp.ClientSession):
+    url = "https://freelance.habr.com/tasks/rss"
+    jobs = []
+    try:
+        async with session.get(url, timeout=10) as response:
+            if response.status == 200:
+                content = await response.text()
+                root = ET.fromstring(content)
+                for item in root.findall('./channel/item'):
+                    title = item.find('title').text if item.find('title') is not None else ""
+                    link = item.find('link').text if item.find('link') is not None else ""
+                    description = item.find('description').text if item.find('description') is not None else ""
+                    description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
+                    jobs.append({"id": link, "title": f"[Habr] {title}", "link": link, "description": description})
+    except Exception as e:
+        logging.error(f"Ошибка парсинга Хабр Фриланс: {e}")
     return jobs
 
 # ==========================================
@@ -163,22 +166,24 @@ def contains_keywords(title: str) -> bool:
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет запущен!</b> База данных подключена. Мониторинг активен.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v4.0 запущен!</b> Подключены FL.ru и Хабр Фриланс.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
-            logging.info("Сканирую ленту...")
-            jobs = await fetch_fl_jobs(session)
+            logging.info("Сканирую ленты (FL + Habr)...")
+            
+            # Собираем задачи с обеих бирж параллельно
+            fl_jobs = await fetch_fl_jobs(session)
+            habr_jobs = await fetch_habr_jobs(session)
+            all_jobs = fl_jobs + habr_jobs
             
             new_matches = 0
-            for job in jobs:
-                # Проверяем в базе SQLite
+            for job in all_jobs:
                 if is_job_seen(job['id']):
                     continue
                 
-                # Сразу записываем в базу
                 mark_job_seen(job['id'])
                 
                 if contains_keywords(job['title']):
@@ -207,9 +212,7 @@ async def scan_freelance_boards():
 # ЗАПУСК
 # ==========================================
 async def main():
-    # Инициализируем базу данных при старте
     init_db()
-    
     asyncio.create_task(scan_freelance_boards())
     await dp.start_polling(bot)
 
