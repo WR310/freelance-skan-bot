@@ -2,7 +2,7 @@ import asyncio
 import logging
 import xml.etree.ElementTree as ET
 import aiohttp
-import google.generativeai as genai
+from google import genai
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -15,20 +15,19 @@ TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
 GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 
-# Ключевые слова для поиска заказов
+# Ключевые слова для поиска заказов (теперь ищем только в заголовках)
 KEYWORDS = ["python", "бот", "telegram", "телеграм", "парсер", "api", "скрипт", "автоматизация", "chatgpt"]
 
 # Интервал проверки новых заказов (в секундах)
-CHECK_INTERVAL = 300  # 5 минут (не стоит делать меньше, чтобы FL.ru не забанил IP)
+CHECK_INTERVAL = 300  
 
 # ==========================================
 # ИНИЦИАЛИЗАЦИЯ
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Настройка Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Инициализация нового клиента Gemini
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Настройка Telegram бота
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -41,7 +40,7 @@ seen_jobs = set()
 # ЛОГИКА ИИ (ГЕНЕРАЦИЯ ОТКЛИКА)
 # ==========================================
 async def generate_cover_letter(title: str, description: str) -> str:
-    """Генерирует продающий отклик с помощью Gemini (Нативная асинхронность)."""
+    """Генерирует продающий отклик с помощью нового SDK Google GenAI."""
     prompt = f"""
     Ты — профессиональный Python-разработчик на фрилансе. 
     Твоя задача — написать короткий, уверенный и цепляющий отклик на заказ. 
@@ -53,11 +52,16 @@ async def generate_cover_letter(title: str, description: str) -> str:
     Напиши отклик от первого лица на русском языке. Максимум 4-5 предложений.
     """
     try:
-        response = await model.generate_content_async(prompt)
+        # Для нового SDK используем run_in_executor, так как асинхронный клиент пока может быть нестабилен
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: client.models.generate_content(
+            model='gemini-2.5-flash', # Используем актуальную модель
+            contents=prompt
+        ))
         return response.text.strip()
     except Exception as e:
         logging.error(f"Ошибка при генерации отклика: {e}")
-        return "⚠️ Ошибка генерации текста отклика. Проверь API-ключ Gemini."
+        return "⚠️ Ошибка генерации текста отклика."
 
 # ==========================================
 # ПАРСИНГ (СБОР ДАННЫХ)
@@ -80,11 +84,10 @@ async def fetch_fl_jobs(session: aiohttp.ClientSession):
                 link = item.find('link').text if item.find('link') is not None else ""
                 description = item.find('description').text if item.find('description') is not None else ""
                 
-                # Очистка описания от базовых HTML сущностей
                 description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
                 
                 jobs.append({
-                    "id": link,  # В качестве уникального ID используем ссылку
+                    "id": link,  
                     "title": title,
                     "link": link,
                     "description": description
@@ -97,17 +100,17 @@ async def fetch_fl_jobs(session: aiohttp.ClientSession):
 # ==========================================
 # ОСНОВНОЙ РАБОЧИЙ ЦИКЛ
 # ==========================================
-def contains_keywords(text: str) -> bool:
-    """Проверяет, есть ли ключевые слова в тексте."""
-    text_lower = text.lower()
+def contains_keywords(title: str) -> bool:
+    """Проверяет, есть ли ключевые слова СТРОГО В ЗАГОЛОВКЕ."""
+    text_lower = title.lower()
     return any(keyword in text_lower for keyword in KEYWORDS)
 
 async def scan_freelance_boards():
     """Фоновая задача сканирования бирж."""
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет запущен!</b> Начинаю мониторинг заказов...")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет запущен (v2.0)!</b> Мониторинг настроен...")
     except Exception as e:
-        logging.error(f"Не удалось отправить сообщение. ВАЖНО: Зайди в свой бот и нажми /start! Ошибка: {e}")
+        logging.error(f"Не удалось отправить сообщение. Ошибка: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
@@ -121,21 +124,18 @@ async def scan_freelance_boards():
                 
                 seen_jobs.add(job['id'])
                 
-                # Проверяем на ключи и заголовок, и описание
-                full_text = f"{job['title']} {job['description']}"
-                if contains_keywords(full_text):
+                # ИЩЕМ КЛЮЧИ ТОЛЬКО В ЗАГОЛОВКЕ
+                if contains_keywords(job['title']):
                     new_matches += 1
                     logging.info(f"Найден подходящий заказ: {job['title']}")
                     
-                    # Генерируем отклик через ИИ
                     cover_letter = await generate_cover_letter(job['title'], job['description'])
                     
-                    # Формируем сообщение
                     msg = (
                         f"🔥 <b>Новый заказ!</b>\n\n"
                         f"<b>Название:</b> {job['title']}\n"
                         f"<b>Ссылка:</b> {job['link']}\n\n"
-                        f"🤖 <b>Сгенерированный отклик (нажми, чтобы скопировать):</b>\n"
+                        f"🤖 <b>Сгенерированный отклик:</b>\n"
                         f"<code>{cover_letter}</code>"
                     )
                     
@@ -144,21 +144,17 @@ async def scan_freelance_boards():
                     except Exception as e:
                         logging.error(f"Ошибка отправки в Telegram: {e}")
             
-            logging.info(f"Проверка завершена. Найдено {new_matches} новых заказов по ключам. Сплю {CHECK_INTERVAL} сек.")
+            logging.info(f"Проверка завершена. Найдено {new_matches} целевых заказов. Сплю {CHECK_INTERVAL} сек.")
             await asyncio.sleep(CHECK_INTERVAL)
 
 # ==========================================
 # ЗАПУСК ПРОГРАММЫ
 # ==========================================
 async def main():
-    # Запускаем фоновый парсинг как отдельную асинхронную задачу
     asyncio.create_task(scan_freelance_boards())
-    
-    # Запускаем поллинг бота (ожидание апдейтов от серверов Telegram)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Фикс для корректного закрытия Event Loop на Windows
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
