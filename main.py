@@ -11,8 +11,9 @@ from google import genai
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile, BotCommand
 from playwright.async_api import async_playwright
 import sys
 
@@ -22,6 +23,11 @@ import sys
 TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
 GEMINI_API_KEY = "ВСТАВЬ_СЮДА_НОВЫЙ_СЕКРЕТНЫЙ_КЛЮЧ"
+
+# --- НАСТРОЙКА ПРОКСИ ---
+USE_PROXY = True
+# Формат: "http://ЛОГИН:ПАРОЛЬ@IP:ПОРТ"
+PROXY_URL = "http://login:password@123.45.67.89:8000"
 
 DEFAULT_KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
@@ -36,11 +42,22 @@ CHECK_INTERVAL = 300
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+# Умная инициализация с прокси
+if USE_PROXY and PROXY_URL:
+    logging.info("Инициализация: ПРОКСИ ВКЛЮЧЕН.")
+    # Прокси для Gemini
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options={'proxy': PROXY_URL})
+    # Прокси для Telegram
+    bot_session = AiohttpSession(proxy=PROXY_URL)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN, session=bot_session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+else:
+    logging.info("Инициализация: ПРЯМОЕ ПОДКЛЮЧЕНИЕ (БЕЗ ПРОКСИ).")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
+dp = Dispatcher()
 force_scan_event = asyncio.Event()
+start_time = datetime.now() 
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
@@ -143,39 +160,77 @@ def save_to_excel(title: str, link: str, cover_letter: str):
         logging.error(f"Ошибка сохранения в Excel: {e}")
 
 # ==========================================
-# ТЕЛЕГРАМ КОМАНДЫ
+# ТЕЛЕГРАМ КОМАНДЫ И ИНТЕРФЕЙС
 # ==========================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == TELEGRAM_USER_ID:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
+            [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")],
+            [InlineKeyboardButton(text="📖 Открыть справку", callback_data="show_help")]
         ])
         await message.answer(
-            "👋 <b>Привет!</b> Скайнет-сканер работает.\n\n"
-            "Команды:\n"
-            "/status — Статистика\n"
-            "/keys — Управление ключами", 
+            "🤖 <b>СКАЙНЕТ АКТИВИРОВАН</b>\n\n"
+            "Добро пожаловать в панель управления автономной системой лидогенерации.\n"
+            "Используйте кнопку <b>«Меню»</b> слева внизу для быстрой навигации.", 
             reply_markup=kb
         )
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    if message.from_user.id == TELEGRAM_USER_ID:
+        await send_help_message(message)
+
+async def send_help_message(message_or_callback):
+    text = (
+        "📖 <b>БАЗА ЗНАНИЙ СИСТЕМЫ</b>\n\n"
+        "<b>Доступные команды:</b>\n"
+        "🔹 /status — Вызов дашборда со статистикой\n"
+        "🔹 /keys — Просмотр активных ключевых слов\n"
+        "🔹 /get_crm — Скачать таблицу (Excel) с лидами\n\n"
+        "<b>Управление фильтрами:</b>\n"
+        "➕ <code>/add_key слово</code> — добавить фильтр (например: <i>/add_key django</i>)\n"
+        "➖ <code>/del_key слово</code> — удалить фильтр (например: <i>/del_key бот</i>)\n\n"
+        "💡 <i>Нейросеть Gemini автоматически фильтрует мусорные заказы и пишет отклики только на целевые лиды.</i>"
+    )
+    if isinstance(message_or_callback, types.Message):
+        await message_or_callback.answer(text)
+    else:
+        await message_or_callback.message.answer(text)
+
+@dp.callback_query(F.data == "show_help")
+async def process_show_help(callback: CallbackQuery):
+    if callback.from_user.id == TELEGRAM_USER_ID:
+        await callback.answer()
+        await send_help_message(callback)
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     if message.from_user.id == TELEGRAM_USER_ID:
         total_jobs = get_total_seen_jobs()
         total_keys = len(get_keywords())
+        
+        uptime = datetime.now() - start_time
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        uptime_str = f"{uptime.days} дн. {hours} ч. {minutes} мин."
+        
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
+            [InlineKeyboardButton(text="📥 Выгрузить CRM (Excel)", callback_data="get_crm_btn")]
         ])
         
         await message.answer(
-            f"✅ <b>Система стабильна.</b>\n"
-            f"🌐 <b>Источники (4):</b> FL, Kwork, Freelancium, Work24\n"
-            f"📊 <b>CRM:</b> Активна (clients.xlsx)\n"
-            f"🧠 <b>AI-Фильтр:</b> Включен\n"
-            f"🔍 <b>Ключевых слов:</b> {total_keys}\n"
-            f"🗂 <b>Заказов в базе:</b> {total_jobs}\n"
-            f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут.",
+            "📊 <b>ДАШБОРД УПРАВЛЕНИЯ</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Статус:</b> Online\n"
+            f"⏱ <b>Время работы:</b> {uptime_str}\n"
+            f"📡 <b>Сенсоры:</b> FL, Kwork, Freelancium, Work24\n"
+            f"🧠 <b>AI-Модуль:</b> Активен (Gemini)\n\n"
+            "<b>СТАТИСТИКА БАЗЫ:</b>\n"
+            f"🎯 <b>Активных фильтров:</b> {total_keys}\n"
+            f"🗂 <b>Проанализировано заказов:</b> {total_jobs}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Цикл сканирования: каждые {CHECK_INTERVAL // 60} мин.</i>",
             reply_markup=kb
         )
 
@@ -185,35 +240,70 @@ async def cmd_keys(message: types.Message):
         keys = get_keywords()
         keys_text = "\n".join([f"• <code>{k}</code>" for k in keys])
         await message.answer(
-            f"🔑 <b>Твои ключевые слова для поиска:</b>\n\n"
+            f"🔑 <b>АКТИВНЫЕ ФИЛЬТРЫ ({len(keys)}):</b>\n\n"
             f"{keys_text}\n\n"
-            f"➕ <b>Добавить:</b>\n<code>/add_key слово</code>\n"
-            f"➖ <b>Удалить:</b>\n<code>/del_key слово</code>"
+            f"<i>Для добавления отправьте:</i>\n<code>/add_key слово</code>"
         )
 
 @dp.message(Command("add_key"))
 async def cmd_add_key(message: types.Message, command: CommandObject):
     if message.from_user.id == TELEGRAM_USER_ID:
         if not command.args:
-            await message.answer("⚠️ Напиши слово после команды. Пример:\n<code>/add_key django</code>")
+            await message.answer("⚠️ Укажите слово. Пример:\n<code>/add_key fastapi</code>")
             return
         word = command.args.strip().lower()
         if add_keyword(word):
-            await message.answer(f"✅ Слово <b>{word}</b> добавлено в базу. Оно будет учитываться при следующем сканировании.")
+            await message.answer(f"✅ Фильтр <b>{word}</b> успешно добавлен в матрицу поиска.")
         else:
-            await message.answer(f"⚠️ Слово <b>{word}</b> уже есть в базе.")
+            await message.answer(f"⚠️ Фильтр <b>{word}</b> уже существует.")
 
 @dp.message(Command("del_key"))
 async def cmd_del_key(message: types.Message, command: CommandObject):
     if message.from_user.id == TELEGRAM_USER_ID:
         if not command.args:
-            await message.answer("⚠️ Напиши слово после команды. Пример:\n<code>/del_key парсер</code>")
+            await message.answer("⚠️ Укажите слово. Пример:\n<code>/del_key парсер</code>")
             return
         word = command.args.strip().lower()
         if remove_keyword(word):
-            await message.answer(f"🗑 Слово <b>{word}</b> удалено из поиска.")
+            await message.answer(f"🗑 Фильтр <b>{word}</b> удален.")
         else:
-            await message.answer(f"⚠️ Слова <b>{word}</b> нет в базе.")
+            await message.answer(f"⚠️ Фильтр <b>{word}</b> не найден в базе.")
+
+@dp.message(Command("get_crm"))
+async def cmd_get_crm(message: types.Message):
+    await send_crm_file(message)
+
+@dp.callback_query(F.data == "get_crm_btn")
+async def process_get_crm_btn(callback: CallbackQuery):
+    if callback.from_user.id == TELEGRAM_USER_ID:
+        await callback.answer("Готовлю файл...", show_alert=False)
+        await send_crm_file(callback)
+
+async def send_crm_file(message_or_callback):
+    user_id = message_or_callback.from_user.id
+    if user_id == TELEGRAM_USER_ID:
+        file_path = "clients.xlsx"
+        if os.path.exists(file_path):
+            try:
+                document = FSInputFile(file_path)
+                msg = "📊 Ваша актуальная база лидов с фриланса."
+                if isinstance(message_or_callback, types.Message):
+                    await message_or_callback.answer_document(document, caption=msg)
+                else:
+                    await message_or_callback.message.answer_document(document, caption=msg)
+            except Exception as e:
+                logging.error(f"Ошибка при отправке CRM: {e}")
+                err_msg = "⚠️ Не удалось отправить файл. Убедитесь, что он закрыт в Excel на компьютере."
+                if isinstance(message_or_callback, types.Message):
+                    await message_or_callback.answer(err_msg)
+                else:
+                    await message_or_callback.message.answer(err_msg)
+        else:
+            err_msg = "⚠️ База CRM пока пуста. Ожидайте первых лидов."
+            if isinstance(message_or_callback, types.Message):
+                await message_or_callback.answer(err_msg)
+            else:
+                await message_or_callback.message.answer(err_msg)
 
 @dp.callback_query(F.data == "force_scan")
 async def process_force_scan(callback: CallbackQuery):
@@ -330,17 +420,13 @@ async def fetch_freelancium_jobs(browser) -> list:
     return jobs
 
 async def fetch_work24_jobs(browser) -> list:
-    """Парсер для Work24.ru с точными селекторами"""
     jobs = []
     try:
         page = await browser.new_page()
         logging.info("Playwright: Открываю Work24...")
         await page.goto("https://work24.ru/orders", timeout=60000) 
-        
-        # Ждем появления ссылок с нужным классом
         await page.wait_for_selector('a.order-item__subhead__left__title__link', timeout=15000) 
         
-        # Собираем все эти ссылки
         elements = await page.query_selector_all('a.order-item__subhead__left__title__link')
         for el in elements[:15]:
             title = await el.inner_text()
@@ -352,7 +438,6 @@ async def fetch_work24_jobs(browser) -> list:
                     "id": full_link, 
                     "title": f"[Work24] {title.strip()}", 
                     "link": full_link, 
-                    # Поскольку блок с описанием мы не парсим, оставляем заглушку
                     "description": "Детали внутри карточки на сайте Work24" 
                 })
                 
@@ -369,7 +454,7 @@ async def fetch_work24_jobs(browser) -> list:
 # ==========================================
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v12.1 запущен!</b>\nПодключены 4 биржи: FL, Kwork, Freelancium, Work24.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v14.0 запущен!</b>\nПрокси инициализирован. Нажмите /help для справки.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
@@ -422,8 +507,13 @@ async def scan_freelance_boards():
                         
                         save_to_excel(job['title'], job['link'], cover_letter)
                         
-                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть заказ на бирже", url=job['link'])]])
-                        msg = f"🔥 <b>Новый заказ!</b>\n\n<b>Название:</b> {job['title']}\n\n🤖 <b>Сгенерированный отклик:</b>\n<code>{cover_letter}</code>"
+                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть заказ", url=job['link'])]])
+                        msg = (
+                            f"🔥 <b>НОВЫЙ ЛИД</b> #новый_заказ\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"<b>Проект:</b> {job['title']}\n\n"
+                            f"🤖 <b>AI Отклик:</b>\n<blockquote>{cover_letter}</blockquote>"
+                        )
                         
                         try:
                             await bot.send_message(TELEGRAM_USER_ID, msg, reply_markup=kb)
@@ -445,6 +535,15 @@ async def scan_freelance_boards():
 # ==========================================
 async def main():
     init_db()
+    
+    commands = [
+        BotCommand(command="start", description="Перезапустить бота"),
+        BotCommand(command="status", description="Панель управления (Дашборд)"),
+        BotCommand(command="keys", description="Настройка фильтров"),
+        BotCommand(command="get_crm", description="Выгрузить Excel базу"),
+        BotCommand(command="help", description="База знаний (Справка)")
+    ]
+    await bot.set_my_commands(commands)
     
     scanner_task = asyncio.create_task(scan_freelance_boards())
     polling_task = asyncio.create_task(dp.start_polling(bot))
