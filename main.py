@@ -22,12 +22,9 @@ GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 # Ключевые слова для поиска
 KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
-# Источники RSS-лент (добавляй новые сюда)
+# Источники RSS-лент (Оставили только стабильно работающий FL.ru)
 RSS_FEEDS = {
-    "FL": "https://www.fl.ru/rss/all.xml",
-    "Habr": "https://freelance.habr.com/tasks/rss",
-    "Weblancer": "https://www.weblancer.net/rss/jobs.rss",
-    "Freelance.ru": "https://freelance.ru/rss/index"
+    "FL": "https://www.fl.ru/rss/all.xml"
 }
 
 # Интервал автоматической проверки
@@ -45,7 +42,6 @@ dp = Dispatcher()
 force_scan_event = asyncio.Event()
 compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in KEYWORDS]
 
-# Базовые заголовки, чтобы сайты не блокировали запросы
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
 }
@@ -109,7 +105,7 @@ async def cmd_status(message: types.Message):
         sources_list = ", ".join(RSS_FEEDS.keys())
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
-            f"🌐 <b>Источники ({len(RSS_FEEDS)}):</b> {sources_list}\n"
+            f"🌐 <b>Активные источники ({len(RSS_FEEDS)}):</b> {sources_list}\n"
             f"🧠 <b>AI-Фильтр:</b> Включен (отсев неадеквата)\n"
             f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
             f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
@@ -120,7 +116,7 @@ async def cmd_status(message: types.Message):
 @dp.callback_query(F.data == "force_scan")
 async def process_force_scan(callback: CallbackQuery):
     if callback.from_user.id == TELEGRAM_USER_ID:
-        await callback.answer("Запускаю внеочередное сканирование всех бирж...", show_alert=False)
+        await callback.answer("Запускаю внеочередное сканирование...", show_alert=False)
         force_scan_event.set() 
 
 # ==========================================
@@ -151,7 +147,7 @@ async def generate_cover_letter(title: str, description: str) -> str:
         return "⚠️ Ошибка генерации."
 
 # ==========================================
-# ПАРСИНГ ИСТОЧНИКОВ (УНИВЕРСАЛЬНЫЙ)
+# ПАРСИНГ ИСТОЧНИКОВ
 # ==========================================
 async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: str) -> list:
     """Универсальный асинхронный парсер для любой RSS-ленты."""
@@ -164,7 +160,6 @@ async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: 
             
             content = await response.text()
             
-            # Защита от кривого XML
             try:
                 root = ET.fromstring(content)
             except ET.ParseError:
@@ -176,7 +171,6 @@ async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: 
                 link = item.find('link').text if item.find('link') is not None else ""
                 description = item.find('description').text if item.find('description') is not None else ""
                 
-                # Очистка HTML тегов и спецсимволов (чтобы ИИ не путался)
                 description = re.sub(r'<[^>]+>', '', description)
                 description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
                 
@@ -199,20 +193,18 @@ def contains_keywords(title: str) -> bool:
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v7.0 запущен!</b>\nПараллельный мониторинг 4 бирж активирован.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v7.1 запущен!</b>\nМертвые RSS-ленты удалены. Мониторинг FL.ru активен.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
-            logging.info("Сканирую ленты (Параллельный сбор)...")
+            logging.info("Сканирую активные ленты...")
             force_scan_event.clear() 
             
-            # Запускаем сбор со всех бирж одновременно (Pro-level оптимизация)
             tasks = [fetch_rss_feed(session, name, url) for name, url in RSS_FEEDS.items()]
             results = await asyncio.gather(*tasks)
             
-            # Объединяем результаты из всех лент в один список
             all_jobs = []
             for job_list in results:
                 all_jobs.extend(job_list)
