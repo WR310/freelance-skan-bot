@@ -22,6 +22,14 @@ GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 # Ключевые слова для поиска
 KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
+# Источники RSS-лент (добавляй новые сюда)
+RSS_FEEDS = {
+    "FL": "https://www.fl.ru/rss/all.xml",
+    "Habr": "https://freelance.habr.com/tasks/rss",
+    "Weblancer": "https://www.weblancer.net/rss/jobs.rss",
+    "Freelance.ru": "https://freelance.ru/rss/index"
+}
+
 # Интервал автоматической проверки
 CHECK_INTERVAL = 300  
 
@@ -34,11 +42,13 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Событие для принудительного запуска парсера по кнопке
 force_scan_event = asyncio.Event()
-
-# Предкомпилируем регулярные выражения для скорости
 compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in KEYWORDS]
+
+# Базовые заголовки, чтобы сайты не блокировали запросы
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+}
 
 # ==========================================
 # БАЗА ДАННЫХ (SQLITE)
@@ -86,7 +96,7 @@ async def cmd_start(message: types.Message):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
         ])
-        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status для статистики или используй кнопку ниже.", reply_markup=kb)
+        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status для статистики.", reply_markup=kb)
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
@@ -95,9 +105,12 @@ async def cmd_status(message: types.Message):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
         ])
+        
+        sources_list = ", ".join(RSS_FEEDS.keys())
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
-            f"🌐 <b>Источники:</b> FL.ru, Хабр Фриланс\n"
+            f"🌐 <b>Источники ({len(RSS_FEEDS)}):</b> {sources_list}\n"
+            f"🧠 <b>AI-Фильтр:</b> Включен (отсев неадеквата)\n"
             f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
             f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
             f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут.",
@@ -107,22 +120,23 @@ async def cmd_status(message: types.Message):
 @dp.callback_query(F.data == "force_scan")
 async def process_force_scan(callback: CallbackQuery):
     if callback.from_user.id == TELEGRAM_USER_ID:
-        await callback.answer("Запускаю внеочередное сканирование...", show_alert=False)
-        force_scan_event.set() # Сигнализируем циклу проснуться
+        await callback.answer("Запускаю внеочередное сканирование всех бирж...", show_alert=False)
+        force_scan_event.set() 
 
 # ==========================================
-# ЛОГИКА ИИ (ГЕНЕРАЦИЯ ОТКЛИКА)
+# ЛОГИКА ИИ (ФИЛЬТРАЦИЯ + ГЕНЕРАЦИЯ ОТКЛИКА)
 # ==========================================
 async def generate_cover_letter(title: str, description: str) -> str:
     prompt = f"""
-    Ты — профессиональный Python-разработчик на фрилансе. 
-    Твоя задача — написать короткий, уверенный и цепляющий отклик на заказ. 
-    Без воды, без лишних приветствий (сразу к делу). Упомяни, что готов приступить и имеешь нужный опыт.
+    Ты — профессиональный Python-разработчик на фрилансе. Тебе поступил заказ.
     
     Заказ: {title}
     Описание: {description}
     
-    Напиши отклик от первого лица на русском языке. Максимум 4-5 предложений.
+    ШАГ 1: Оцени адекватность заказа. Если заказчик просит сделать что-то нереально огромное за копейки (например, клон соцсети за 2000 рублей), или это откровенный спам/скам, или тестовое задание без оплаты — напиши в ответе РОВНО ОДНО СЛОВО: SKIP
+    
+    ШАГ 2: Если заказ в целом адекватный, напиши короткий, уверенный и цепляющий отклик от первого лица на русском языке. 
+    Без воды, без лишних приветствий (сразу к делу). Упомяни, что готов приступить и имеешь нужный опыт. Максимум 4-5 предложений.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -134,45 +148,47 @@ async def generate_cover_letter(title: str, description: str) -> str:
         return response.text.strip()
     except Exception as e:
         logging.error(f"Ошибка API Gemini: {e}")
-        return "⚠️ Ошибка генерации. Возможно, лимит запросов."
+        return "⚠️ Ошибка генерации."
 
 # ==========================================
-# ПАРСИНГ ИСТОЧНИКОВ
+# ПАРСИНГ ИСТОЧНИКОВ (УНИВЕРСАЛЬНЫЙ)
 # ==========================================
-async def fetch_fl_jobs(session: aiohttp.ClientSession):
-    url = "https://www.fl.ru/rss/all.xml"
+async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: str) -> list:
+    """Универсальный асинхронный парсер для любой RSS-ленты."""
     jobs = []
     try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                content = await response.text()
+        async with session.get(url, headers=HEADERS, timeout=15) as response:
+            if response.status != 200:
+                logging.error(f"Ошибка парсинга {source_name}: Статус {response.status}")
+                return jobs
+            
+            content = await response.text()
+            
+            # Защита от кривого XML
+            try:
                 root = ET.fromstring(content)
-                for item in root.findall('./channel/item'):
-                    title = item.find('title').text if item.find('title') is not None else ""
-                    link = item.find('link').text if item.find('link') is not None else ""
-                    description = item.find('description').text if item.find('description') is not None else ""
-                    description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
-                    jobs.append({"id": link, "title": f"[FL] {title}", "link": link, "description": description})
-    except Exception as e:
-        logging.error(f"Ошибка парсинга FL.ru: {e}")
-    return jobs
+            except ET.ParseError:
+                logging.error(f"Ошибка чтения XML с биржи {source_name}.")
+                return jobs
 
-async def fetch_habr_jobs(session: aiohttp.ClientSession):
-    url = "https://freelance.habr.com/tasks/rss"
-    jobs = []
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                content = await response.text()
-                root = ET.fromstring(content)
-                for item in root.findall('./channel/item'):
-                    title = item.find('title').text if item.find('title') is not None else ""
-                    link = item.find('link').text if item.find('link') is not None else ""
-                    description = item.find('description').text if item.find('description') is not None else ""
-                    description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">")
-                    jobs.append({"id": link, "title": f"[Habr] {title}", "link": link, "description": description})
+            for item in root.findall('.//item'):
+                title = item.find('title').text if item.find('title') is not None else ""
+                link = item.find('link').text if item.find('link') is not None else ""
+                description = item.find('description').text if item.find('description') is not None else ""
+                
+                # Очистка HTML тегов и спецсимволов (чтобы ИИ не путался)
+                description = re.sub(r'<[^>]+>', '', description)
+                description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+                
+                jobs.append({
+                    "id": link, 
+                    "title": f"[{source_name}] {title.strip()}", 
+                    "link": link.strip(), 
+                    "description": description.strip()
+                })
     except Exception as e:
-        logging.error(f"Ошибка парсинга Хабр Фриланс: {e}")
+        logging.error(f"Сбой при подключении к {source_name}: {e}")
+        
     return jobs
 
 # ==========================================
@@ -183,18 +199,23 @@ def contains_keywords(title: str) -> bool:
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v5.0 запущен!</b> Добавлено кнопочное управление.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v7.0 запущен!</b>\nПараллельный мониторинг 4 бирж активирован.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
-            logging.info("Сканирую ленты (FL + Habr)...")
-            force_scan_event.clear() # Сбрасываем триггер кнопки
+            logging.info("Сканирую ленты (Параллельный сбор)...")
+            force_scan_event.clear() 
             
-            fl_jobs = await fetch_fl_jobs(session)
-            habr_jobs = await fetch_habr_jobs(session)
-            all_jobs = fl_jobs + habr_jobs
+            # Запускаем сбор со всех бирж одновременно (Pro-level оптимизация)
+            tasks = [fetch_rss_feed(session, name, url) for name, url in RSS_FEEDS.items()]
+            results = await asyncio.gather(*tasks)
+            
+            # Объединяем результаты из всех лент в один список
+            all_jobs = []
+            for job_list in results:
+                all_jobs.extend(job_list)
             
             new_matches = 0
             for job in all_jobs:
@@ -204,10 +225,15 @@ async def scan_freelance_boards():
                 mark_job_seen(job['id'])
                 
                 if contains_keywords(job['title']):
-                    new_matches += 1
-                    logging.info(f"Нашел заказ: {job['title']}")
                     
                     cover_letter = await generate_cover_letter(job['title'], job['description'])
+                    
+                    if "SKIP" in cover_letter.upper():
+                        logging.info(f"🚫 Нейросеть забраковала неадекватный заказ: {job['title']}")
+                        continue
+                    
+                    new_matches += 1
+                    logging.info(f"Нашел отличный заказ: {job['title']}")
                     
                     kb = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="🔗 Открыть заказ на бирже", url=job['link'])]
@@ -225,14 +251,13 @@ async def scan_freelance_boards():
                     except Exception as e:
                         logging.error(f"Ошибка отправки: {e}")
             
-            logging.info(f"Найдено {new_matches} новых заказов. Жду {CHECK_INTERVAL} сек или ручного запуска.")
+            logging.info(f"Проверка завершена. Найдено {new_matches} целевых заказов. Жду {CHECK_INTERVAL} сек или ручного запуска.")
             
-            # Умное ожидание: либо таймер 5 минут, либо сигнал от кнопки
             try:
                 await asyncio.wait_for(force_scan_event.wait(), timeout=CHECK_INTERVAL)
                 logging.info("⚡ Запущен принудительный поиск по кнопке!")
             except asyncio.TimeoutError:
-                pass # Время вышло, идем на следующий круг штатно
+                pass 
 
 # ==========================================
 # ЗАПУСК
