@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from playwright.async_api import async_playwright
 import sys
 
 # ==========================================
@@ -22,7 +23,7 @@ GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 # Ключевые слова для поиска
 KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
-# Источники RSS-лент (Оставили только стабильно работающий FL.ru)
+# Источники легких RSS-лент
 RSS_FEEDS = {
     "FL": "https://www.fl.ru/rss/all.xml"
 }
@@ -102,10 +103,9 @@ async def cmd_status(message: types.Message):
             [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
         ])
         
-        sources_list = ", ".join(RSS_FEEDS.keys())
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
-            f"🌐 <b>Активные источники ({len(RSS_FEEDS)}):</b> {sources_list}\n"
+            f"🌐 <b>Источники:</b> FL.ru (RSS), Kwork (Playwright)\n"
             f"🧠 <b>AI-Фильтр:</b> Включен (отсев неадеквата)\n"
             f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
             f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
@@ -116,7 +116,7 @@ async def cmd_status(message: types.Message):
 @dp.callback_query(F.data == "force_scan")
 async def process_force_scan(callback: CallbackQuery):
     if callback.from_user.id == TELEGRAM_USER_ID:
-        await callback.answer("Запускаю внеочередное сканирование...", show_alert=False)
+        await callback.answer("Запускаю внеочередное сканирование (включая браузер)...", show_alert=False)
         force_scan_event.set() 
 
 # ==========================================
@@ -129,7 +129,7 @@ async def generate_cover_letter(title: str, description: str) -> str:
     Заказ: {title}
     Описание: {description}
     
-    ШАГ 1: Оцени адекватность заказа. Если заказчик просит сделать что-то нереально огромное за копейки (например, клон соцсети за 2000 рублей), или это откровенный спам/скам, или тестовое задание без оплаты — напиши в ответе РОВНО ОДНО СЛОВО: SKIP
+    ШАГ 1: Оцени адекватность заказа. Если заказчик просит сделать что-то нереально огромное за копейки, или это откровенный спам/скам, или тестовое задание без оплаты — напиши в ответе РОВНО ОДНО СЛОВО: SKIP
     
     ШАГ 2: Если заказ в целом адекватный, напиши короткий, уверенный и цепляющий отклик от первого лица на русском языке. 
     Без воды, без лишних приветствий (сразу к делу). Упомяни, что готов приступить и имеешь нужный опыт. Максимум 4-5 предложений.
@@ -150,20 +150,16 @@ async def generate_cover_letter(title: str, description: str) -> str:
 # ПАРСИНГ ИСТОЧНИКОВ
 # ==========================================
 async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: str) -> list:
-    """Универсальный асинхронный парсер для любой RSS-ленты."""
     jobs = []
     try:
         async with session.get(url, headers=HEADERS, timeout=15) as response:
             if response.status != 200:
-                logging.error(f"Ошибка парсинга {source_name}: Статус {response.status}")
                 return jobs
             
             content = await response.text()
-            
             try:
                 root = ET.fromstring(content)
             except ET.ParseError:
-                logging.error(f"Ошибка чтения XML с биржи {source_name}.")
                 return jobs
 
             for item in root.findall('.//item'):
@@ -181,7 +177,47 @@ async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: 
                     "description": description.strip()
                 })
     except Exception as e:
-        logging.error(f"Сбой при подключении к {source_name}: {e}")
+        logging.error(f"Ошибка RSS {source_name}: {e}")
+    return jobs
+
+async def fetch_kwork_jobs() -> list:
+    """Тяжелый браузерный парсер для Kwork через Playwright."""
+    jobs = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            
+            logging.info("Playwright: Открываю Kwork...")
+            # Kwork иногда долго отдает страницу, увеличим таймаут
+            await page.goto("https://kwork.ru/projects?c=11", timeout=60000)
+            
+            # Ждем появления хотя бы одной карточки заказа
+            await page.wait_for_selector('.want-card', timeout=15000)
+            
+            cards = await page.query_selector_all('.want-card')
+            for card in cards[:15]:
+                title_el = await card.query_selector('.wants-card__header-title a')
+                desc_el = await card.query_selector('.wants-card__description-text')
+                
+                if title_el and desc_el:
+                    title = await title_el.inner_text()
+                    link = await title_el.get_attribute('href')
+                    description = await desc_el.inner_text()
+                    
+                    full_link = link if link.startswith('http') else f"https://kwork.ru{link}"
+                    
+                    jobs.append({
+                        "id": full_link, 
+                        "title": f"[Kwork] {title.strip()}", 
+                        "link": full_link, 
+                        "description": description.strip()
+                    })
+                    
+            await browser.close()
+            logging.info(f"Playwright: Kwork успешно спарсен ({len(jobs)} заказов на странице).")
+    except Exception as e:
+        logging.error(f"Ошибка Playwright при парсинге Kwork: {e}")
         
     return jobs
 
@@ -193,21 +229,19 @@ def contains_keywords(title: str) -> bool:
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v7.1 запущен!</b>\nМертвые RSS-ленты удалены. Мониторинг FL.ru активен.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v8.1 запущен!</b>\nДвижок Playwright перенастроен и готов к бою.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
-            logging.info("Сканирую активные ленты...")
+            logging.info("Сканирую ленты (RSS + Playwright)...")
             force_scan_event.clear() 
             
-            tasks = [fetch_rss_feed(session, name, url) for name, url in RSS_FEEDS.items()]
-            results = await asyncio.gather(*tasks)
+            fl_jobs = await fetch_rss_feed(session, "FL", RSS_FEEDS["FL"])
+            kwork_jobs = await fetch_kwork_jobs()
             
-            all_jobs = []
-            for job_list in results:
-                all_jobs.extend(job_list)
+            all_jobs = fl_jobs + kwork_jobs
             
             new_matches = 0
             for job in all_jobs:
@@ -260,10 +294,12 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+    # Убрали WindowsSelectorEventLoopPolicy, чтобы Playwright мог создавать подпроцессы!
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Остановлено.")
+        logging.info("Остановлено вручную.")
+    except RuntimeError as e:
+        # Глушим стандартную ошибку aiohttp при закрытии в Windows
+        if 'Event loop is closed' not in str(e):
+            raise
