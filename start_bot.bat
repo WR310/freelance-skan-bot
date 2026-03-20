@@ -8,7 +8,7 @@ echo Источники: FL.ru, Kwork, Freelancium, Work24
 echo.
 
 :: Переходим в папку с твоим проектом
-cd /d "C:\Users\GPC\project\vibecoding\buisnes\botscan\freelance-skan-bot"
+cd /d "C:\Users\GPC\project\botscan\freelance-skan-bot"
 
 :: Запускаем скрипт
 python main.py
