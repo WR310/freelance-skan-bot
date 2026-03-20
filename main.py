@@ -22,12 +22,12 @@ import sys
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
-GEMINI_API_KEY = "ВСТАВЬ_СЮДА_НОВЫЙ_СЕКРЕТНЫЙ_КЛЮЧ"
+GEMINI_API_KEY = "AIzaSyBGkI3Pcbv8xSl8PRnYKXKHoQ19ubhvyIM"
 
 # --- НАСТРОЙКА ПРОКСИ ---
 USE_PROXY = True
-# Формат: "http://ЛОГИН:ПАРОЛЬ@IP:ПОРТ"
-PROXY_URL = "http://login:password@123.45.67.89:8000"
+# Если HTTP прокси не работает, попробуй поменять "http://" на "socks5://"
+PROXY_URL = "socks5://Xm8w9UTx:eJ9AisX1@176.53.133.112:64863"
 
 DEFAULT_KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
@@ -38,23 +38,12 @@ RSS_FEEDS = {
 CHECK_INTERVAL = 300  
 
 # ==========================================
-# ИНИЦИАЛИЗАЦИЯ
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Умная инициализация с прокси
-if USE_PROXY and PROXY_URL:
-    logging.info("Инициализация: ПРОКСИ ВКЛЮЧЕН.")
-    # Прокси для Gemini
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={'proxy': PROXY_URL})
-    # Прокси для Telegram
-    bot_session = AiohttpSession(proxy=PROXY_URL)
-    bot = Bot(token=TELEGRAM_BOT_TOKEN, session=bot_session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-else:
-    logging.info("Инициализация: ПРЯМОЕ ПОДКЛЮЧЕНИЕ (БЕЗ ПРОКСИ).")
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-
+bot = None
+client = None
 dp = Dispatcher()
 force_scan_event = asyncio.Event()
 start_time = datetime.now() 
@@ -160,7 +149,7 @@ def save_to_excel(title: str, link: str, cover_letter: str):
         logging.error(f"Ошибка сохранения в Excel: {e}")
 
 # ==========================================
-# ТЕЛЕГРАМ КОМАНДЫ И ИНТЕРФЕЙС
+# ТЕЛЕГРАМ КОМАНДЫ
 # ==========================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -189,9 +178,8 @@ async def send_help_message(message_or_callback):
         "🔹 /keys — Просмотр активных ключевых слов\n"
         "🔹 /get_crm — Скачать таблицу (Excel) с лидами\n\n"
         "<b>Управление фильтрами:</b>\n"
-        "➕ <code>/add_key слово</code> — добавить фильтр (например: <i>/add_key django</i>)\n"
-        "➖ <code>/del_key слово</code> — удалить фильтр (например: <i>/del_key бот</i>)\n\n"
-        "💡 <i>Нейросеть Gemini автоматически фильтрует мусорные заказы и пишет отклики только на целевые лиды.</i>"
+        "➕ <code>/add_key слово</code> — добавить фильтр\n"
+        "➖ <code>/del_key слово</code> — удалить фильтр"
     )
     if isinstance(message_or_callback, types.Message):
         await message_or_callback.answer(text)
@@ -225,7 +213,7 @@ async def cmd_status(message: types.Message):
             "🟢 <b>Статус:</b> Online\n"
             f"⏱ <b>Время работы:</b> {uptime_str}\n"
             f"📡 <b>Сенсоры:</b> FL, Kwork, Freelancium, Work24\n"
-            f"🧠 <b>AI-Модуль:</b> Активен (Gemini)\n\n"
+            f"🧠 <b>AI-Модуль:</b> Активен\n\n"
             "<b>СТАТИСТИКА БАЗЫ:</b>\n"
             f"🎯 <b>Активных фильтров:</b> {total_keys}\n"
             f"🗂 <b>Проанализировано заказов:</b> {total_jobs}\n"
@@ -240,20 +228,18 @@ async def cmd_keys(message: types.Message):
         keys = get_keywords()
         keys_text = "\n".join([f"• <code>{k}</code>" for k in keys])
         await message.answer(
-            f"🔑 <b>АКТИВНЫЕ ФИЛЬТРЫ ({len(keys)}):</b>\n\n"
-            f"{keys_text}\n\n"
-            f"<i>Для добавления отправьте:</i>\n<code>/add_key слово</code>"
+            f"🔑 <b>АКТИВНЫЕ ФИЛЬТРЫ ({len(keys)}):</b>\n\n{keys_text}"
         )
 
 @dp.message(Command("add_key"))
 async def cmd_add_key(message: types.Message, command: CommandObject):
     if message.from_user.id == TELEGRAM_USER_ID:
         if not command.args:
-            await message.answer("⚠️ Укажите слово. Пример:\n<code>/add_key fastapi</code>")
+            await message.answer("⚠️ Укажите слово.")
             return
         word = command.args.strip().lower()
         if add_keyword(word):
-            await message.answer(f"✅ Фильтр <b>{word}</b> успешно добавлен в матрицу поиска.")
+            await message.answer(f"✅ Фильтр <b>{word}</b> добавлен.")
         else:
             await message.answer(f"⚠️ Фильтр <b>{word}</b> уже существует.")
 
@@ -261,13 +247,13 @@ async def cmd_add_key(message: types.Message, command: CommandObject):
 async def cmd_del_key(message: types.Message, command: CommandObject):
     if message.from_user.id == TELEGRAM_USER_ID:
         if not command.args:
-            await message.answer("⚠️ Укажите слово. Пример:\n<code>/del_key парсер</code>")
+            await message.answer("⚠️ Укажите слово.")
             return
         word = command.args.strip().lower()
         if remove_keyword(word):
             await message.answer(f"🗑 Фильтр <b>{word}</b> удален.")
         else:
-            await message.answer(f"⚠️ Фильтр <b>{word}</b> не найден в базе.")
+            await message.answer(f"⚠️ Фильтр <b>{word}</b> не найден.")
 
 @dp.message(Command("get_crm"))
 async def cmd_get_crm(message: types.Message):
@@ -293,13 +279,8 @@ async def send_crm_file(message_or_callback):
                     await message_or_callback.message.answer_document(document, caption=msg)
             except Exception as e:
                 logging.error(f"Ошибка при отправке CRM: {e}")
-                err_msg = "⚠️ Не удалось отправить файл. Убедитесь, что он закрыт в Excel на компьютере."
-                if isinstance(message_or_callback, types.Message):
-                    await message_or_callback.answer(err_msg)
-                else:
-                    await message_or_callback.message.answer(err_msg)
         else:
-            err_msg = "⚠️ База CRM пока пуста. Ожидайте первых лидов."
+            err_msg = "⚠️ База CRM пока пуста."
             if isinstance(message_or_callback, types.Message):
                 await message_or_callback.answer(err_msg)
             else:
@@ -312,16 +293,14 @@ async def process_force_scan(callback: CallbackQuery):
         force_scan_event.set() 
 
 # ==========================================
-# ЛОГИКА ИИ
+# ЛОГИКА ИИ И ПАРСИНГА
 # ==========================================
 async def generate_cover_letter(title: str, description: str) -> str:
+    global client
     prompt = f"""
-    Ты — профессиональный Python-разработчик на фрилансе. Тебе поступил заказ.
-    Заказ: {title}
-    Описание: {description}
-    ШАГ 1: Оцени адекватность заказа. Если заказчик просит сделать что-то нереально огромное за копейки, или это откровенный спам/скам, или тестовое задание без оплаты — напиши в ответе РОВНО ОДНО СЛОВО: SKIP
-    ШАГ 2: Если заказ в целом адекватный, напиши короткий, уверенный и цепляющий отклик от первого лица на русском языке. 
-    Без воды, без лишних приветствий (сразу к делу). Упомяни, что готов приступить и имеешь нужный опыт. Максимум 4-5 предложений.
+    Ты — профессиональный Python-разработчик на фрилансе. Заказ: {title}. Описание: {description}.
+    ШАГ 1: Если это мусор или скам — напиши РОВНО ОДНО СЛОВО: SKIP.
+    ШАГ 2: Иначе напиши короткий, уверенный отклик (4-5 предложений). Без воды.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -335,9 +314,6 @@ async def generate_cover_letter(title: str, description: str) -> str:
         logging.error(f"Ошибка API Gemini: {e}")
         return "⚠️ Ошибка генерации."
 
-# ==========================================
-# ПАРСИНГ ИСТОЧНИКОВ
-# ==========================================
 async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: str) -> list:
     jobs = []
     try:
@@ -354,7 +330,6 @@ async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: 
                 link = item.find('link').text if item.find('link') is not None else ""
                 description = item.find('description').text if item.find('description') is not None else ""
                 description = re.sub(r'<[^>]+>', '', description)
-                description = description.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
                 jobs.append({"id": link, "title": f"[{source_name}] {title.strip()}", "link": link.strip(), "description": description.strip()})
     except Exception as e:
         logging.error(f"Ошибка RSS {source_name}: {e}")
@@ -367,23 +342,20 @@ async def fetch_kwork_jobs(browser) -> list:
         logging.info("Playwright: Открываю Kwork...")
         await page.goto("https://kwork.ru/projects?c=11", timeout=60000)
         await page.wait_for_selector('.want-card', timeout=15000)
-        
         cards = await page.query_selector_all('.want-card')
         for card in cards[:15]:
             title_el = await card.query_selector('.wants-card__header-title a')
             desc_el = await card.query_selector('.wants-card__description-text')
-            
             if title_el and desc_el:
                 title = await title_el.inner_text()
                 link = await title_el.get_attribute('href')
                 description = await desc_el.inner_text()
                 full_link = link if link.startswith('http') else f"https://kwork.ru{link}"
                 jobs.append({"id": full_link, "title": f"[Kwork] {title.strip()}", "link": full_link, "description": description.strip()})
-                
         await page.close()
         logging.info(f"Playwright: Kwork успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
-        logging.error(f"Ошибка Playwright при парсинге Kwork: {e}")
+        logging.error(f"Ошибка Playwright Kwork: {e}")
     return jobs
 
 async def fetch_freelancium_jobs(browser) -> list:
@@ -393,28 +365,20 @@ async def fetch_freelancium_jobs(browser) -> list:
         logging.info("Playwright: Открываю Freelancium...")
         await page.goto("https://freelancium.ru/projects", timeout=60000)
         await page.wait_for_selector('h2 a[href*="/project/"]', timeout=15000) 
-        
         cards = await page.query_selector_all('a.shadow-sm.border')
         for card in cards[:15]:
             title_el = await card.query_selector('h2 a')
             desc_el = await card.query_selector('div.break-words')
-            
             if title_el and desc_el:
                 title = await title_el.inner_text()
                 link = await title_el.get_attribute('href')
                 description = await desc_el.inner_text()
                 full_link = link if link.startswith('http') else f"https://freelancium.ru{link}"
-                jobs.append({
-                    "id": full_link, 
-                    "title": f"[Freelancium] {title.strip()}", 
-                    "link": full_link, 
-                    "description": description.strip()
-                })
-                
+                jobs.append({"id": full_link, "title": f"[Freelancium] {title.strip()}", "link": full_link, "description": description.strip()})
         await page.close()
         logging.info(f"Playwright: Freelancium успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
-        logging.error(f"Ошибка Playwright при парсинге Freelancium: {e}")
+        logging.error(f"Ошибка Playwright Freelancium: {e}")
         try: await page.close() 
         except: pass
     return jobs
@@ -426,35 +390,25 @@ async def fetch_work24_jobs(browser) -> list:
         logging.info("Playwright: Открываю Work24...")
         await page.goto("https://work24.ru/orders", timeout=60000) 
         await page.wait_for_selector('a.order-item__subhead__left__title__link', timeout=15000) 
-        
         elements = await page.query_selector_all('a.order-item__subhead__left__title__link')
         for el in elements[:15]:
             title = await el.inner_text()
             link = await el.get_attribute('href')
-            
             if title and link:
                 full_link = link if link.startswith('http') else f"https://work24.ru{link}"
-                jobs.append({
-                    "id": full_link, 
-                    "title": f"[Work24] {title.strip()}", 
-                    "link": full_link, 
-                    "description": "Детали внутри карточки на сайте Work24" 
-                })
-                
+                jobs.append({"id": full_link, "title": f"[Work24] {title.strip()}", "link": full_link, "description": "Детали внутри карточки на сайте Work24" })
         await page.close()
         logging.info(f"Playwright: Work24 успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
-        logging.error(f"Ошибка Playwright при парсинге Work24: {e}")
+        logging.error(f"Ошибка Playwright Work24: {e}")
         try: await page.close() 
         except: pass
     return jobs
 
-# ==========================================
-# ОСНОВНОЙ РАБОЧИЙ ЦИКЛ
-# ==========================================
 async def scan_freelance_boards():
+    global bot
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v14.0 запущен!</b>\nПрокси инициализирован. Нажмите /help для справки.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v15.0 запущен!</b>\nПоиск инициализирован.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
@@ -472,26 +426,19 @@ async def scan_freelance_boards():
                 
                 all_jobs = []
                 
-                # 1. Сбор RSS
                 fl_jobs = await fetch_rss_feed(session, "FL", RSS_FEEDS["FL"])
                 all_jobs.extend(fl_jobs)
                 
-                # 2. Сбор Playwright
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-                    
                     kwork_jobs = await fetch_kwork_jobs(browser)
                     all_jobs.extend(kwork_jobs)
-                    
                     freelancium_jobs = await fetch_freelancium_jobs(browser)
                     all_jobs.extend(freelancium_jobs)
-                    
                     work24_jobs = await fetch_work24_jobs(browser)
                     all_jobs.extend(work24_jobs)
-                    
                     await browser.close()
                 
-                new_matches = 0
                 for job in all_jobs:
                     if is_job_seen(job['id']):
                         continue
@@ -503,17 +450,9 @@ async def scan_freelance_boards():
                         if "SKIP" in cover_letter.upper():
                             continue
                         
-                        new_matches += 1
-                        
                         save_to_excel(job['title'], job['link'], cover_letter)
-                        
                         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть заказ", url=job['link'])]])
-                        msg = (
-                            f"🔥 <b>НОВЫЙ ЛИД</b> #новый_заказ\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"<b>Проект:</b> {job['title']}\n\n"
-                            f"🤖 <b>AI Отклик:</b>\n<blockquote>{cover_letter}</blockquote>"
-                        )
+                        msg = f"🔥 <b>НОВЫЙ ЛИД</b> #новый_заказ\n━━━━━━━━━━━━━━━━━━━━\n<b>Проект:</b> {job['title']}\n\n🤖 <b>AI Отклик:</b>\n<blockquote>{cover_letter}</blockquote>"
                         
                         try:
                             await bot.send_message(TELEGRAM_USER_ID, msg, reply_markup=kb)
@@ -531,9 +470,25 @@ async def scan_freelance_boards():
                 await asyncio.sleep(10)
 
 # ==========================================
-# ЗАПУСК
+# ОСНОВНОЙ ЦИКЛ (С ПРАВИЛЬНЫМ РЕСТАРТОМ)
 # ==========================================
 async def main():
+    global bot, client
+    
+    if USE_PROXY and PROXY_URL:
+        logging.info("Инициализация: ПРОКСИ ВКЛЮЧЕН.")
+        os.environ['http_proxy'] = PROXY_URL
+        os.environ['https_proxy'] = PROXY_URL
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        bot_session = AiohttpSession(proxy=PROXY_URL)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, session=bot_session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    else:
+        logging.info("Инициализация: ПРЯМОЕ ПОДКЛЮЧЕНИЕ (БЕЗ ПРОКСИ).")
+        if 'http_proxy' in os.environ: del os.environ['http_proxy']
+        if 'https_proxy' in os.environ: del os.environ['https_proxy']
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
     init_db()
     
     commands = [
@@ -550,8 +505,8 @@ async def main():
     
     try:
         await asyncio.gather(scanner_task, polling_task)
-    except Exception as e:
-        logging.error(f"Критическая ошибка: {e}")
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     while True:
