@@ -21,9 +21,8 @@ import sys
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
-GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
+GEMINI_API_KEY = "AIzaSyAB-cermLeNsXy31SRrX23MQ9aAR3X5RJ4"
 
-# Базовые ключи (будут добавлены в БД при первом запуске)
 DEFAULT_KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
 RSS_FEEDS = {
@@ -56,7 +55,6 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS seen_jobs (id TEXT PRIMARY KEY)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS keywords (word TEXT PRIMARY KEY)''')
     
-    # Загружаем базовые ключи, если таблица пустая
     cursor.execute('SELECT COUNT(*) FROM keywords')
     if cursor.fetchone()[0] == 0:
         for k in DEFAULT_KEYWORDS:
@@ -65,7 +63,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Функции работы с заказами
 def is_job_seen(job_id: str) -> bool:
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
@@ -89,7 +86,6 @@ def get_total_seen_jobs() -> int:
     conn.close()
     return count
 
-# Функции работы с ключами
 def get_keywords() -> list:
     conn = sqlite3.connect('scanner.db')
     cursor = conn.cursor()
@@ -174,7 +170,7 @@ async def cmd_status(message: types.Message):
         
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
-            f"🌐 <b>Источники:</b> FL.ru (RSS), Kwork (Playwright)\n"
+            f"🌐 <b>Источники (4):</b> FL, Kwork, Freelancium, Work24\n"
             f"📊 <b>CRM:</b> Активна (clients.xlsx)\n"
             f"🧠 <b>AI-Фильтр:</b> Включен\n"
             f"🔍 <b>Ключевых слов:</b> {total_keys}\n"
@@ -274,33 +270,90 @@ async def fetch_rss_feed(session: aiohttp.ClientSession, source_name: str, url: 
         logging.error(f"Ошибка RSS {source_name}: {e}")
     return jobs
 
-async def fetch_kwork_jobs() -> list:
+async def fetch_kwork_jobs(browser) -> list:
     jobs = []
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-            page = await browser.new_page()
+        page = await browser.new_page()
+        logging.info("Playwright: Открываю Kwork...")
+        await page.goto("https://kwork.ru/projects?c=11", timeout=60000)
+        await page.wait_for_selector('.want-card', timeout=15000)
+        
+        cards = await page.query_selector_all('.want-card')
+        for card in cards[:15]:
+            title_el = await card.query_selector('.wants-card__header-title a')
+            desc_el = await card.query_selector('.wants-card__description-text')
             
-            logging.info("Playwright: Открываю Kwork...")
-            await page.goto("https://kwork.ru/projects?c=11", timeout=60000)
-            await page.wait_for_selector('.want-card', timeout=15000)
-            
-            cards = await page.query_selector_all('.want-card')
-            for card in cards[:15]:
-                title_el = await card.query_selector('.wants-card__header-title a')
-                desc_el = await card.query_selector('.wants-card__description-text')
+            if title_el and desc_el:
+                title = await title_el.inner_text()
+                link = await title_el.get_attribute('href')
+                description = await desc_el.inner_text()
+                full_link = link if link.startswith('http') else f"https://kwork.ru{link}"
+                jobs.append({"id": full_link, "title": f"[Kwork] {title.strip()}", "link": full_link, "description": description.strip()})
                 
-                if title_el and desc_el:
-                    title = await title_el.inner_text()
-                    link = await title_el.get_attribute('href')
-                    description = await desc_el.inner_text()
-                    full_link = link if link.startswith('http') else f"https://kwork.ru{link}"
-                    jobs.append({"id": full_link, "title": f"[Kwork] {title.strip()}", "link": full_link, "description": description.strip()})
-                    
-            await browser.close()
-            logging.info(f"Playwright: Kwork успешно спарсен ({len(jobs)} заказов).")
+        await page.close()
+        logging.info(f"Playwright: Kwork успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
         logging.error(f"Ошибка Playwright при парсинге Kwork: {e}")
+    return jobs
+
+async def fetch_freelancium_jobs(browser) -> list:
+    """Парсер для Freelancium.ru"""
+    jobs = []
+    try:
+        page = await browser.new_page()
+        logging.info("Playwright: Открываю Freelancium...")
+        await page.goto("https://freelancium.ru/projects", timeout=60000)
+        await page.wait_for_selector('.project-item', timeout=15000) # Предполагаемый класс карточки заказа
+        
+        cards = await page.query_selector_all('.project-item')
+        for card in cards[:15]:
+            title_el = await card.query_selector('.project-title a') # Предполагаемый селектор заголовка
+            desc_el = await card.query_selector('.project-description') # Предполагаемый селектор описания
+            
+            if title_el and desc_el:
+                title = await title_el.inner_text()
+                link = await title_el.get_attribute('href')
+                description = await desc_el.inner_text()
+                full_link = link if link.startswith('http') else f"https://freelancium.ru{link}"
+                jobs.append({"id": full_link, "title": f"[Freelancium] {title.strip()}", "link": full_link, "description": description.strip()})
+                
+        await page.close()
+        logging.info(f"Playwright: Freelancium успешно спарсен ({len(jobs)} заказов).")
+    except Exception as e:
+        logging.error(f"Ошибка Playwright при парсинге Freelancium (Возможно изменилась верстка сайта): {e}")
+        # Закрываем страницу в случае ошибки, чтобы не висела в памяти
+        try: await page.close() 
+        except: pass
+    return jobs
+
+async def fetch_work24_jobs(browser) -> list:
+    """Парсер для Work24.ru"""
+    jobs = []
+    try:
+        page = await browser.new_page()
+        logging.info("Playwright: Открываю Work24...")
+        await page.goto("https://work24.ru/orders", timeout=60000) # Предполагаемый URL ленты заказов
+        await page.wait_for_selector('.order-card', timeout=15000) # Предполагаемый класс карточки заказа
+        
+        cards = await page.query_selector_all('.order-card')
+        for card in cards[:15]:
+            title_el = await card.query_selector('.order-title a') # Предполагаемый селектор заголовка
+            desc_el = await card.query_selector('.order-text') # Предполагаемый селектор описания
+            
+            if title_el and desc_el:
+                title = await title_el.inner_text()
+                link = await title_el.get_attribute('href')
+                description = await desc_el.inner_text()
+                full_link = link if link.startswith('http') else f"https://work24.ru{link}"
+                jobs.append({"id": full_link, "title": f"[Work24] {title.strip()}", "link": full_link, "description": description.strip()})
+                
+        await page.close()
+        logging.info(f"Playwright: Work24 успешно спарсен ({len(jobs)} заказов).")
+    except Exception as e:
+        logging.error(f"Ошибка Playwright при парсинге Work24 (Возможно изменилась верстка сайта): {e}")
+        # Закрываем страницу в случае ошибки, чтобы не висела в памяти
+        try: await page.close() 
+        except: pass
     return jobs
 
 # ==========================================
@@ -308,26 +361,42 @@ async def fetch_kwork_jobs() -> list:
 # ==========================================
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v11.0 запущен!</b>\nВключено управление ключами прямо из чата.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v12.0 запущен!</b>\nПодключены 4 биржи: FL, Kwork, Freelancium, Work24.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                logging.info("Сканирую ленты (FL + Kwork)...")
+                logging.info("Сканирую ленты (FL + Playwright 3x)...")
                 force_scan_event.clear() 
                 
-                # Подтягиваем актуальные ключи из БД перед каждой проверкой
                 current_keys = get_keywords()
                 compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in current_keys]
                 
                 def contains_keywords(title: str) -> bool:
                     return any(pattern.search(title) for pattern in compiled_keywords)
                 
+                all_jobs = []
+                
+                # 1. Сбор RSS
                 fl_jobs = await fetch_rss_feed(session, "FL", RSS_FEEDS["FL"])
-                kwork_jobs = await fetch_kwork_jobs()
-                all_jobs = fl_jobs + kwork_jobs
+                all_jobs.extend(fl_jobs)
+                
+                # 2. Сбор Playwright (Один инстанс браузера для всех бирж)
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+                    
+                    kwork_jobs = await fetch_kwork_jobs(browser)
+                    all_jobs.extend(kwork_jobs)
+                    
+                    freelancium_jobs = await fetch_freelancium_jobs(browser)
+                    all_jobs.extend(freelancium_jobs)
+                    
+                    work24_jobs = await fetch_work24_jobs(browser)
+                    all_jobs.extend(work24_jobs)
+                    
+                    await browser.close()
                 
                 new_matches = 0
                 for job in all_jobs:
@@ -343,7 +412,6 @@ async def scan_freelance_boards():
                         
                         new_matches += 1
                         
-                        # Сохраняем в Excel
                         save_to_excel(job['title'], job['link'], cover_letter)
                         
                         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть заказ на бирже", url=job['link'])]])
