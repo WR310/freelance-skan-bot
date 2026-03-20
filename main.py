@@ -5,10 +5,11 @@ import re
 import aiohttp
 import sqlite3
 from google import genai
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import sys
 
 # ==========================================
@@ -21,7 +22,7 @@ GEMINI_API_KEY = "AIzaSyB5SmtomV2Pbs6vKCwzchaXdJy4-CkB6Sk"
 # Ключевые слова для поиска
 KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
-# Интервал проверки новых заказов
+# Интервал автоматической проверки
 CHECK_INTERVAL = 300  
 
 # ==========================================
@@ -32,6 +33,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# Событие для принудительного запуска парсера по кнопке
+force_scan_event = asyncio.Event()
 
 # Предкомпилируем регулярные выражения для скорости
 compiled_keywords = [re.compile(rf'\b{re.escape(k)}\b', re.IGNORECASE) for k in KEYWORDS]
@@ -79,19 +83,32 @@ def get_total_seen_jobs() -> int:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == TELEGRAM_USER_ID:
-        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status, чтобы проверить статистику.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
+        ])
+        await message.answer("👋 <b>Привет!</b> Скайнет-сканер работает.\n\nЖми /status для статистики или используй кнопку ниже.", reply_markup=kb)
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     if message.from_user.id == TELEGRAM_USER_ID:
         total_jobs = get_total_seen_jobs()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔎 Искать прямо сейчас", callback_data="force_scan")]
+        ])
         await message.answer(
             f"✅ <b>Система стабильна.</b>\n"
             f"🌐 <b>Источники:</b> FL.ru, Хабр Фриланс\n"
             f"🔍 <b>Ключевых слов:</b> {len(KEYWORDS)}\n"
             f"🗂 <b>Заказов в базе (SQLite):</b> {total_jobs}\n"
-            f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут."
+            f"⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} минут.",
+            reply_markup=kb
         )
+
+@dp.callback_query(F.data == "force_scan")
+async def process_force_scan(callback: CallbackQuery):
+    if callback.from_user.id == TELEGRAM_USER_ID:
+        await callback.answer("Запускаю внеочередное сканирование...", show_alert=False)
+        force_scan_event.set() # Сигнализируем циклу проснуться
 
 # ==========================================
 # ЛОГИКА ИИ (ГЕНЕРАЦИЯ ОТКЛИКА)
@@ -166,15 +183,15 @@ def contains_keywords(title: str) -> bool:
 
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v4.0 запущен!</b> Подключены FL.ru и Хабр Фриланс.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v5.0 запущен!</b> Добавлено кнопочное управление.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
     async with aiohttp.ClientSession() as session:
         while True:
             logging.info("Сканирую ленты (FL + Habr)...")
+            force_scan_event.clear() # Сбрасываем триггер кнопки
             
-            # Собираем задачи с обеих бирж параллельно
             fl_jobs = await fetch_fl_jobs(session)
             habr_jobs = await fetch_habr_jobs(session)
             all_jobs = fl_jobs + habr_jobs
@@ -192,21 +209,30 @@ async def scan_freelance_boards():
                     
                     cover_letter = await generate_cover_letter(job['title'], job['description'])
                     
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔗 Открыть заказ на бирже", url=job['link'])]
+                    ])
+                    
                     msg = (
                         f"🔥 <b>Новый заказ!</b>\n\n"
-                        f"<b>Название:</b> {job['title']}\n"
-                        f"<b>Ссылка:</b> {job['link']}\n\n"
+                        f"<b>Название:</b> {job['title']}\n\n"
                         f"🤖 <b>Сгенерированный отклик:</b>\n"
                         f"<code>{cover_letter}</code>"
                     )
                     
                     try:
-                        await bot.send_message(TELEGRAM_USER_ID, msg)
+                        await bot.send_message(TELEGRAM_USER_ID, msg, reply_markup=kb)
                     except Exception as e:
                         logging.error(f"Ошибка отправки: {e}")
             
-            logging.info(f"Найдено {new_matches} новых заказов. Сплю {CHECK_INTERVAL} сек.")
-            await asyncio.sleep(CHECK_INTERVAL)
+            logging.info(f"Найдено {new_matches} новых заказов. Жду {CHECK_INTERVAL} сек или ручного запуска.")
+            
+            # Умное ожидание: либо таймер 5 минут, либо сигнал от кнопки
+            try:
+                await asyncio.wait_for(force_scan_event.wait(), timeout=CHECK_INTERVAL)
+                logging.info("⚡ Запущен принудительный поиск по кнопке!")
+            except asyncio.TimeoutError:
+                pass # Время вышло, идем на следующий круг штатно
 
 # ==========================================
 # ЗАПУСК
