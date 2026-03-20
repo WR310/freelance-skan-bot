@@ -21,7 +21,7 @@ import sys
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8732409277:AAGEYg8ptrWGygY-EmB23rcm93gFLtWE5AU"
 TELEGRAM_USER_ID = 1652878568
-GEMINI_API_KEY = "AIzaSyAB-cermLeNsXy31SRrX23MQ9aAR3X5RJ4"
+GEMINI_API_KEY = "ВСТАВЬ_СЮДА_НОВЫЙ_СЕКРЕТНЫЙ_КЛЮЧ"
 
 DEFAULT_KEYWORDS = ["python", "telegram", "телеграм", "парсер", "api", "скрипт", "чат-бот", "бот", "openai", "chatgpt"]
 
@@ -297,48 +297,50 @@ async def fetch_kwork_jobs(browser) -> list:
     return jobs
 
 async def fetch_freelancium_jobs(browser) -> list:
-    """Парсер для Freelancium.ru"""
     jobs = []
     try:
         page = await browser.new_page()
         logging.info("Playwright: Открываю Freelancium...")
         await page.goto("https://freelancium.ru/projects", timeout=60000)
-        await page.wait_for_selector('.project-item', timeout=15000) # Предполагаемый класс карточки заказа
+        await page.wait_for_selector('h2 a[href*="/project/"]', timeout=15000) 
         
-        cards = await page.query_selector_all('.project-item')
+        cards = await page.query_selector_all('a.shadow-sm.border')
         for card in cards[:15]:
-            title_el = await card.query_selector('.project-title a') # Предполагаемый селектор заголовка
-            desc_el = await card.query_selector('.project-description') # Предполагаемый селектор описания
+            title_el = await card.query_selector('h2 a')
+            desc_el = await card.query_selector('div.break-words')
             
             if title_el and desc_el:
                 title = await title_el.inner_text()
                 link = await title_el.get_attribute('href')
                 description = await desc_el.inner_text()
                 full_link = link if link.startswith('http') else f"https://freelancium.ru{link}"
-                jobs.append({"id": full_link, "title": f"[Freelancium] {title.strip()}", "link": full_link, "description": description.strip()})
+                jobs.append({
+                    "id": full_link, 
+                    "title": f"[Freelancium] {title.strip()}", 
+                    "link": full_link, 
+                    "description": description.strip()
+                })
                 
         await page.close()
         logging.info(f"Playwright: Freelancium успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
-        logging.error(f"Ошибка Playwright при парсинге Freelancium (Возможно изменилась верстка сайта): {e}")
-        # Закрываем страницу в случае ошибки, чтобы не висела в памяти
+        logging.error(f"Ошибка Playwright при парсинге Freelancium: {e}")
         try: await page.close() 
         except: pass
     return jobs
 
 async def fetch_work24_jobs(browser) -> list:
-    """Парсер для Work24.ru"""
     jobs = []
     try:
         page = await browser.new_page()
         logging.info("Playwright: Открываю Work24...")
-        await page.goto("https://work24.ru/orders", timeout=60000) # Предполагаемый URL ленты заказов
-        await page.wait_for_selector('.order-card', timeout=15000) # Предполагаемый класс карточки заказа
+        await page.goto("https://work24.ru/orders", timeout=60000) 
+        await page.wait_for_selector('.order-card', timeout=15000) 
         
         cards = await page.query_selector_all('.order-card')
         for card in cards[:15]:
-            title_el = await card.query_selector('.order-title a') # Предполагаемый селектор заголовка
-            desc_el = await card.query_selector('.order-text') # Предполагаемый селектор описания
+            title_el = await card.query_selector('.order-title a') 
+            desc_el = await card.query_selector('.order-text') 
             
             if title_el and desc_el:
                 title = await title_el.inner_text()
@@ -351,7 +353,6 @@ async def fetch_work24_jobs(browser) -> list:
         logging.info(f"Playwright: Work24 успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
         logging.error(f"Ошибка Playwright при парсинге Work24 (Возможно изменилась верстка сайта): {e}")
-        # Закрываем страницу в случае ошибки, чтобы не висела в памяти
         try: await page.close() 
         except: pass
     return jobs
@@ -361,7 +362,7 @@ async def fetch_work24_jobs(browser) -> list:
 # ==========================================
 async def scan_freelance_boards():
     try:
-        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v12.0 запущен!</b>\nПодключены 4 биржи: FL, Kwork, Freelancium, Work24.")
+        await bot.send_message(TELEGRAM_USER_ID, "🚀 <b>Скайнет v12.1 запущен!</b>\nПодключены 4 биржи: FL, Kwork, Freelancium, Work24.")
     except Exception as e:
         logging.error(f"Ошибка TG: {e}")
         
@@ -383,7 +384,7 @@ async def scan_freelance_boards():
                 fl_jobs = await fetch_rss_feed(session, "FL", RSS_FEEDS["FL"])
                 all_jobs.extend(fl_jobs)
                 
-                # 2. Сбор Playwright (Один инстанс браузера для всех бирж)
+                # 2. Сбор Playwright
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
                     
