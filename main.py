@@ -330,29 +330,36 @@ async def fetch_freelancium_jobs(browser) -> list:
     return jobs
 
 async def fetch_work24_jobs(browser) -> list:
+    """Парсер для Work24.ru с точными селекторами"""
     jobs = []
     try:
         page = await browser.new_page()
         logging.info("Playwright: Открываю Work24...")
         await page.goto("https://work24.ru/orders", timeout=60000) 
-        await page.wait_for_selector('.order-card', timeout=15000) 
         
-        cards = await page.query_selector_all('.order-card')
-        for card in cards[:15]:
-            title_el = await card.query_selector('.order-title a') 
-            desc_el = await card.query_selector('.order-text') 
+        # Ждем появления ссылок с нужным классом
+        await page.wait_for_selector('a.order-item__subhead__left__title__link', timeout=15000) 
+        
+        # Собираем все эти ссылки
+        elements = await page.query_selector_all('a.order-item__subhead__left__title__link')
+        for el in elements[:15]:
+            title = await el.inner_text()
+            link = await el.get_attribute('href')
             
-            if title_el and desc_el:
-                title = await title_el.inner_text()
-                link = await title_el.get_attribute('href')
-                description = await desc_el.inner_text()
+            if title and link:
                 full_link = link if link.startswith('http') else f"https://work24.ru{link}"
-                jobs.append({"id": full_link, "title": f"[Work24] {title.strip()}", "link": full_link, "description": description.strip()})
+                jobs.append({
+                    "id": full_link, 
+                    "title": f"[Work24] {title.strip()}", 
+                    "link": full_link, 
+                    # Поскольку блок с описанием мы не парсим, оставляем заглушку
+                    "description": "Детали внутри карточки на сайте Work24" 
+                })
                 
         await page.close()
         logging.info(f"Playwright: Work24 успешно спарсен ({len(jobs)} заказов).")
     except Exception as e:
-        logging.error(f"Ошибка Playwright при парсинге Work24 (Возможно изменилась верстка сайта): {e}")
+        logging.error(f"Ошибка Playwright при парсинге Work24: {e}")
         try: await page.close() 
         except: pass
     return jobs
